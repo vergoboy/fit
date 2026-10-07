@@ -164,19 +164,37 @@ Compatibility issues are caught mechanically by:
 
 ### Desktop-only exceptions
 
-None exist today, and an exception is a special case, not a convenience. It is acceptable only when the Node access is loaded conditionally and is load-bearing in exactly the situations where the API exists, so the fallbacks cover every other case:
+Two exist today (below). An exception is a special case, not a convenience. It is acceptable only when the Node access is loaded conditionally and is load-bearing in exactly the situations where the API exists, so the fallbacks cover every other case:
 
 - It is never reached at module load, only lazily, behind a gate that is false on mobile (an `instanceof FileSystemAdapter` check).
 - Everything it enables degrades gracefully without it: the feature is skipped or reports "unsupported", and nothing else depends on its result.
 - Every failure path (API absent, module fails to resolve, call throws) takes that same fallback.
 
-Real symlink detection is the motivating example, since `DataAdapter` cannot do it. Isolate such code in one module, then allow that one file in both mechanical checks, instead of adding inline disables:
+Real symlink detection is the motivating example, since `DataAdapter` cannot do it. Isolate such code in a dedicated module, then allow that file in both mechanical checks, instead of adding inline disables:
 
 1. In `eslint.config.js`, add a per-file block after the `src/**` block (see the comment there).
 2. In `src/apiCompatibility.test.ts`, let the bundle check treat built-ins as external only when imported from that file.
 3. List the file and the modules it may use here.
 
 Use `require('fs')` for the load: in Obsidian's renderer a bare `import('fs')` is left as a native dynamic import and fails to resolve, while `require` works.
+
+#### Registered exceptions
+
+| File | May use | Gate | Reason |
+| ---- | ------- | ---- | ------ |
+| [src/postSyncHook.ts](../src/postSyncHook.ts) | `child_process` | `Platform.isDesktopApp && vault.adapter instanceof FileSystemAdapter` | Runs the user's opt-in post-sync build/deploy command after a sync that pushed a commit. Nothing else in the plugin depends on it, and it is off by default. |
+| [src/deploy.ts](../src/deploy.ts) | `child_process`, `fs`, `os`, `path` | `Platform.isDesktopApp && vault.adapter instanceof FileSystemAdapter` | Spawns the build and the `ssh`/`rsync` upload for the opt-in built-in deployment after a sync that pushed a commit. Nothing else in the plugin depends on it, and it is off by default. |
+
+The post-sync hook is the simplest example of the shape above:
+
+- `require('child_process')` happens inside `runPostSyncHook`, never at module load, and only after `isPostSyncHookSupported()` returns true.
+- On mobile, when the toggle is off, when no command is configured, or when the module fails to resolve, the result is a `skipped` outcome. The sync itself completes normally either way, and `runPostSyncHook` resolves rather than rejects on every failure path.
+- Its per-file block in `eslint.config.js` relaxes only `no-restricted-globals` by removing `require`; `Buffer`, `process`, and the whole Node built-in import ban still apply to the file.
+- The bundle check in [src/apiCompatibility.test.ts](../src/apiCompatibility.test.ts) treats a built-in as external **only** when both the importing file and the module are on that file's allow-list, asserts the bundle requires exactly the union of those modules, and asserts a non-allow-listed built-in — including one that is on a *different* file's list — still fails.
+
+`src/deploy.ts` follows the same shape with a larger allow-list (`child_process`, `fs`, `os`, `path`): all four are `require`d lazily inside `loadNodeModules`, behind the same gate, and every path where they are absent resolves to a `skipped` result. The bundle check holds one allow-list per file, so the union is what may survive into the bundle while each import is still checked against its own file.
+
+See [docs/post-sync-hook.md](post-sync-hook.md) and [docs/deployment.md](deployment.md) for the features themselves.
 
 ## Known Electron Compatibility Issues
 

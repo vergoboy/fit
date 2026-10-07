@@ -22,8 +22,13 @@ export type SyncOrchestrationError = {
 export type SyncError = VaultError | SyncOrchestrationError;
 
 // Suggested: { success: true; changes: Array<{ heading: string, files: FileChange[] }>; clash: FileClash[] }
+//
+// `pushedRemoteChanges` lists the local changes this sync actually wrote to the remote
+// repo. Non-empty means a commit was created — the signal the desktop post-sync hook keys
+// off, so a pull-only (or nothing-to-upload) sync never triggers a rebuild/deploy. It stays
+// optional so existing result literals, and tests that build one, remain valid.
 export type SyncResult =
-    | { success: true; changeGroups: Array<{ heading: string, changes: FileChange[] }>; clash: FileClash[] }
+    | { success: true; changeGroups: Array<{ heading: string, changes: FileChange[] }>; clash: FileClash[]; pushedRemoteChanges?: FileChange[] }
     | { success: false; error: SyncError };
 
 /**

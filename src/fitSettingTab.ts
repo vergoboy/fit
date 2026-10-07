@@ -8,6 +8,9 @@ import { fitLogger } from "./logger";
 import FitNotice from "./fitNotice";
 import * as Encryption from "./encryption";
 import { FITATTRIBUTES_PATH } from "@/fitAttributes";
+import { isPostSyncHookSupported } from "@/postSyncHook";
+import { DEPLOYMENT_DEFAULT_PORT, deploymentLogPath, isDeploymentSupported, missingDeploymentSettings } from "@/deploy";
+import { DEFAULT_SETTINGS } from "@/fitSettings";
 
 type RefreshCheckPoint = "repo(0)" | "branch(1)" | "link(2)" | "initialize" | "withCache";
 
@@ -729,6 +732,243 @@ export default class FitSettingTab extends PluginSettingTab {
 	};
 
 	/**
+	 * Desktop-only post-sync hook: one shell command, run after a sync that pushed a commit.
+	 * Rendered on every platform (settings live in data.json and follow the user's devices),
+	 * with an explicit note when the current device cannot run it — rather than hiding the
+	 * controls and leaving "why did nothing happen on my phone" unanswered.
+	 * See docs/post-sync-hook.md.
+	 */
+	postSyncHookBlock = () => {
+		const {containerEl} = this;
+		const supported = isPostSyncHookSupported(this.plugin.app.vault);
+
+		new Setting(containerEl)
+			.setHeading()
+			.setName("Post-sync hook (desktop only)")
+			.setDesc("Runs one local command after a sync that pushed a commit — for example rebuilding and deploying a website built from this vault. It never runs on mobile, when disabled, or when a sync only pulled changes.");
+
+		if (!supported) {
+			new Setting(containerEl)
+				.setName("Unavailable on this device")
+				.setDesc("The post-sync hook needs desktop Obsidian, because mobile has no Node.js runtime to launch a command with. The settings below are kept and will take effect on desktop.");
+		}
+
+		new Setting(containerEl)
+			.setName("Enable post-sync hook")
+			.setDesc("Off by default. Nothing is executed until this is on and a command is set.")
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.postSyncHookEnabled)
+				.onChange(async (value) => {
+					this.plugin.settings.postSyncHookEnabled = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName("Hook command")
+			.setDesc("Shell command line, run from the working directory below. This value comes from your own settings file, so treat it as trusted input — e.g. bash /home/you/site/scripts/deploy.sh")
+			.addText(text => text
+				.setPlaceholder('bash /path/to/scripts/deploy.sh')
+				.setValue(this.plugin.settings.postSyncHookCommand)
+				.onChange(async (value) => {
+					this.plugin.settings.postSyncHookCommand = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName("Working directory")
+			.setDesc("Directory the command runs in — point this at the website project so relative paths in the command resolve. Leave empty to inherit Obsidian's own working directory.")
+			.addText(text => text
+				.setPlaceholder('/home/you/site')
+				.setValue(this.plugin.settings.postSyncHookCwd)
+				.onChange(async (value) => {
+					this.plugin.settings.postSyncHookCwd = value;
+					await this.plugin.saveSettings();
+				}));
+
+		const timeoutSetting = new Setting(containerEl)
+			.setName('Hook timeout')
+			.setDesc(`Kill the hook if it is still running after ${this.plugin.settings.postSyncHookTimeoutSec} seconds.`)
+			.addSlider(slider => slider
+				.setLimits(30, 3600, 30)
+				.setValue(this.plugin.settings.postSyncHookTimeoutSec)
+				.setDynamicTooltip()
+				.onChange(async (value) => {
+					this.plugin.settings.postSyncHookTimeoutSec = value;
+					await this.plugin.saveSettings();
+					timeoutSetting.setDesc(`Kill the hook if it is still running after ${value} seconds.`);
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Run hook now")
+			.setDesc("Deploy immediately, without waiting for a sync that pushes a commit. Useful for the first deploy or to retry a failed one. Output goes to the FIT debug log.")
+			.addButton(button => button
+				.setButtonText('Run now')
+				.onClick(() => { void this.plugin.runPostSyncHookNow(); }));
+	};
+
+	/**
+	 * Desktop-only auto-deploy: copy vault content into the website project, build it, publish
+	 * `dist/` over SSH. Rendered on every platform for the same reason as the hook block above
+	 * — these settings live in data.json and follow the user's devices, so hiding the controls
+	 * on a phone would leave "why did nothing happen" unanswered. See docs/deployment.md.
+	 */
+	deploymentBlock = () => {
+		const {containerEl} = this;
+		const settings = this.plugin.settings;
+		const supported = isDeploymentSupported(this.plugin.app.vault);
+
+		new Setting(containerEl)
+			.setHeading()
+			.setName("Deployment configuration (desktop only)")
+			.setDesc("After a sync that pushed a commit: copy the vault's .md/.mdx notes into the website project's content collections, run `npm run build` there, then publish dist/ to your server over SSH with rsync. Off by default.");
+
+		if (!supported) {
+			new Setting(containerEl)
+				.setName("Unavailable on this device")
+				.setDesc("A deployment needs desktop Obsidian, because mobile has no Node.js runtime to run a build or an upload with. These settings are kept and will take effect on desktop.");
+		}
+
+		if (supported && settings.enableAutoDeploy && settings.postSyncHookEnabled) {
+			new Setting(containerEl)
+				.setName("Both this and the post-sync hook are enabled")
+				.setDesc("Both run after the same sync, so one commit would start two builds and two uploads of the same site. Use one of them: either turn the post-sync hook off, or leave auto-deploy off and let the hook run your own script.");
+		}
+
+		new Setting(containerEl)
+			.setName("Enable auto-deploy")
+			.setDesc("Off by default. When on, every sync that pushes a commit deploys the site.")
+			.addToggle(toggle => toggle
+				.setValue(settings.enableAutoDeploy)
+				.onChange(async (value) => {
+					settings.enableAutoDeploy = value;
+					await this.plugin.saveSettings();
+					refreshReadiness();
+				}));
+
+		new Setting(containerEl)
+			.setName("Astro project path")
+			.setDesc("Local checkout of the website project. `npm run build` runs here and dist/ is uploaded from here. Prefilled from this device's FIT defaults.")
+			.addText(text => text
+				.setPlaceholder(DEFAULT_SETTINGS.astroProjectPath)
+				.setValue(settings.astroProjectPath)
+				.onChange(async (value) => {
+					settings.astroProjectPath = value;
+					await this.plugin.saveSettings();
+					refreshReadiness();
+				}));
+
+		new Setting(containerEl)
+			.setName("Vault content path")
+			.setDesc("Vault folder holding the publishable notes, with `project/` and `journal/` subfolders per language. Readable notes are copied into src/content/ — the vault stays the source of truth.")
+			.addText(text => text
+				.setPlaceholder(DEFAULT_SETTINGS.vaultContentPath)
+				.setValue(settings.vaultContentPath)
+				.onChange(async (value) => {
+					settings.vaultContentPath = value;
+					await this.plugin.saveSettings();
+					refreshReadiness();
+				}));
+
+		new Setting(containerEl)
+			.setName("Server host")
+			.setDesc("Deployment server: hostname or IP address.")
+			.addText(text => text
+				.setPlaceholder('example.com')
+				.setValue(settings.sftpHost)
+				.onChange(async (value) => {
+					settings.sftpHost = value;
+					await this.plugin.saveSettings();
+					refreshReadiness();
+				}));
+
+		new Setting(containerEl)
+			.setName("Server port")
+			.setDesc("SSH port. Falls back to 22 when empty or out of range.")
+			.addText(text => {
+				text.inputEl.type = 'number';
+				text.inputEl.min = '1';
+				text.inputEl.max = '65535';
+				text.setPlaceholder(String(DEPLOYMENT_DEFAULT_PORT))
+					.setValue(String(settings.sftpPort))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						settings.sftpPort = Number.isFinite(parsed) ? parsed : DEPLOYMENT_DEFAULT_PORT;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Server user")
+			.setDesc("SSH user the site is published as.")
+			.addText(text => text
+				.setPlaceholder('deploy')
+				.setValue(settings.sftpUser)
+				.onChange(async (value) => {
+					settings.sftpUser = value;
+					await this.plugin.saveSettings();
+					refreshReadiness();
+				}));
+
+		new Setting(containerEl)
+			.setName("Server password")
+			.setDesc("Leave empty to use your SSH key or ssh-agent, which is preferred. A password needs `sshpass` installed. It is stored as plain text in this device's data.json, and FIT strips it before data.json is synced, so it never leaves this machine.")
+			.addText(text => {
+				text.inputEl.type = 'password';
+				text.setPlaceholder('optional')
+					.setValue(settings.sftpPassword)
+					.onChange(async (value) => {
+						settings.sftpPassword = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Remote path")
+			.setDesc("Directory on the server that dist/ is published to. Files there that the build no longer produces are deleted, so point this at a directory dedicated to this site.")
+			.addText(text => text
+				.setPlaceholder('/var/www/site')
+				.setValue(settings.sftpRemotePath)
+				.onChange(async (value) => {
+					settings.sftpRemotePath = value;
+					await this.plugin.saveSettings();
+					refreshReadiness();
+				}));
+
+		const readinessSetting = new Setting(containerEl).setName("Readiness");
+
+		/** Same check the deployer runs, so the UI cannot promise more than it delivers. */
+		function refreshReadiness() {
+			if (!supported) {
+				readinessSetting.setDesc("Desktop Obsidian only.");
+				return;
+			}
+			if (!settings.enableAutoDeploy) {
+				readinessSetting.setDesc("Auto-deploy is off — nothing runs after a sync. It can still be run by hand below.");
+				return;
+			}
+			const missing = missingDeploymentSettings(settings);
+			readinessSetting.setDesc(missing.length > 0
+				? `Not ready — still needs: ${missing.join(', ')}.`
+				: `Ready — ${settings.vaultContentPath.trim()} → ${settings.astroProjectPath.trim()} → ${settings.sftpUser.trim()}@${settings.sftpHost.trim()}:${settings.sftpRemotePath.trim()}`);
+		}
+		refreshReadiness();
+
+		const runLogPath = deploymentLogPath();
+		new Setting(containerEl)
+			.setName("Run deployment now")
+			.setDesc(
+				"Deploy immediately, without waiting for a sync that pushes a commit. Useful for the first deploy or to retry a failed one. "
+				+ "Progress and output go to the FIT debug log"
+				+ (runLogPath === null ? "" : ` and are appended to \`${runLogPath}\` (one entry per run)`)
+				+ "."
+			)
+			.addButton(button => button
+				.setButtonText('Run now')
+				.onClick(() => { void this.plugin.runDeploymentNow(); }));
+	};
+
+	/**
 	 * Config *status* summary, not a live candidate-file list — that's "Explain Sync
 	 * Status"'s job (linked below). Replaces the removed obsidianSyncRules toggle UI:
 	 * no per-path controls here since there's nothing to toggle (git presence + a
@@ -1065,6 +1305,8 @@ export default class FitSettingTab extends PluginSettingTab {
 		this.githubUserInfoBlock();
 		this.repoInfoBlock();
 		this.localConfigBlock();
+		this.postSyncHookBlock();
+		this.deploymentBlock();
 		await this.obsidianSyncInfoBlock();
 		this.noticeConfigBlock();
 		this.refreshFields("withCache");

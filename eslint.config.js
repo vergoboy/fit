@@ -94,6 +94,27 @@ export default [
 		},
 	},
 	{
+		// Desktop-only exceptions: the post-sync hook's and the deployment's lazy `require`s.
+		//
+		// Deliberately the smallest relaxation that works. `require` is removed from
+		// no-restricted-globals and its TypeScript counterpart is turned off; `Buffer` and
+		// `process` stay banned, no-restricted-imports (every Node built-in) still applies in
+		// full, and the TextDecoder / vault.read rules are inherited unchanged — neither file
+		// imports a Node module, they only require one at call time, after a desktop gate.
+		// src/apiCompatibility.test.ts hold each file to its own allow-list (the hook:
+		// `child_process` only; the deployment: `child_process`, `fs`, `os`, `path`) and
+		// assert nothing else reaches the bundle; docs/api-compatibility.md
+		// ("Desktop-only exceptions") documents both.
+		files: ['src/postSyncHook.ts', 'src/deploy.ts'],
+		rules: {
+			'no-restricted-globals': ['error',
+				{ name: 'Buffer', message: 'Buffer is Node.js-only. Use TextEncoder/arrayBufferToBase64 instead.' },
+				{ name: 'process', message: 'process is Node.js-only. Not available on Obsidian mobile.' },
+			],
+			'@typescript-eslint/no-require-imports': 'off',
+		},
+	},
+	{
 		// Test-related files: Allow 'any' type for mocking external libraries
 		// Covers: test files, mock implementations, test utilities, and test setup
 		files: ['**/*.test.ts', '**/__mocks__/**/*.ts', '**/testUtils.ts', '**/vitest.setup.ts'],

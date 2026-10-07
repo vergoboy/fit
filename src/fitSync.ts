@@ -1827,6 +1827,13 @@ export class FitSync implements IFitSync {
 
 			syncNotice.setMessage([headline, ...detailBlocks].join('\n\n'));
 
+			// Empty ⟺ no commit was created this sync. The normal pipeline's remoteOps is
+			// exactly pushChangedFilesToRemote's pushedChanges, and the subset-scope lane only
+			// has a commitSha when it actually called applyChanges — so a rate-limited subset
+			// push (which produced no commit) must not count. Consumers key off "is this
+			// non-empty", not off the exact contents, so the extra subset entries here are safe.
+			const didCreateCommit = remoteOps.length > 0 || subsetScopeResult.commitSha !== undefined;
+
 			return {
 				success: true,
 				changeGroups: [
@@ -1835,7 +1842,8 @@ export class FitSync implements IFitSync {
 					{heading: "Local file updates:", changes: [...localOps, ...untrackNotices, ...subsetScopeResult.localOps]},
 					{heading: "Remote file updates:", changes: [...remoteOps, ...subsetScopeResult.remoteOps]},
 				],
-				clash: conflicts
+				clash: conflicts,
+				pushedRemoteChanges: didCreateCommit ? [...remoteOps, ...subsetScopeResult.remoteOps] : []
 			};
 
 		} catch (error) {

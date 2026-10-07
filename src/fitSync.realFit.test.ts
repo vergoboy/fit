@@ -273,7 +273,13 @@ describe('FitSync', () => {
 					])
 				}
 			]),
-			clash: []
+			clash: [],
+			// Files were pushed, so a commit was created — this is what the desktop
+			// post-sync hook gates on (see docs/post-sync-hook.md).
+			pushedRemoteChanges: expect.arrayContaining([
+				expect.objectContaining({ path: 'fileA.md', type: 'ADDED' }),
+				expect.objectContaining({ path: 'fileB.md', type: 'ADDED' })
+			])
 		});
 
 		// Verify: LocalStores updated with BOTH files
@@ -436,7 +442,10 @@ describe('FitSync', () => {
 						])
 					}
 				]),
-				clash: []
+				clash: [],
+				// Pull-only sync: nothing was pushed, so no commit — the post-sync hook must
+				// stay silent here rather than rebuild the site for an unchanged remote.
+				pushedRemoteChanges: []
 			});
 
 			// Verify: Final local vault state — no _fit/_fit/ write for remote _fit/ files

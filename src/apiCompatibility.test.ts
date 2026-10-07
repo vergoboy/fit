@@ -62,18 +62,40 @@ describe('mobile API compatibility: ESLint', () => {
 const nodeBuiltins = new Set(nodeBuiltinNames);
 
 /**
+ * The desktop-only files allowed to reach Node built-ins, mapped to the exact modules each one
+ * may use: the post-sync hook's lazy `require('child_process')` and the deployer's lazy
+ * `require()` of the process/fs modules it shells out with. Keep in sync with the per-file
+ * block in eslint.config.js and docs/api-compatibility.md § Desktop-only exceptions.
+ */
+const DESKTOP_ONLY_FILES = new Map<string, readonly string[]>([
+	[path.join(repoRoot, 'src/postSyncHook.ts'), ['child_process']],
+	[path.join(repoRoot, 'src/deploy.ts'), ['child_process', 'fs', 'os', 'path']],
+]);
+
+/** Every built-in any desktop-only file may use — the union the bundle must not exceed. */
+const DESKTOP_ONLY_BUILTINS = [...new Set([...DESKTOP_ONLY_FILES.values()].flat())].sort();
+
+const desktopOnlyFile = (name: string) => path.join(repoRoot, name);
+
+/**
  * Fails resolution of any Node built-in, even one whose bare name is also an installed npm
  * package (`buffer`, `events`, `process`, `string_decoder`): without this, esbuild would bundle
  * the package for a browser target and hide an import the real build leaves as a bare
- * `require()`, which throws on mobile. To allow a desktop-only file (see eslint.config.js),
- * return `{ path: args.path, external: true }` here only when args.importer is that file, and
- * assert the built-ins left in the output are exactly the ones it may use.
+ * `require()`, which throws on mobile. The desktop-only exception is keyed on BOTH the
+ * importing file and the module, so the same built-in from anywhere else still fails, and any
+ * other built-in from that file fails too.
  */
 const rejectNodeBuiltins: esbuild.Plugin = {
 	name: 'reject-node-builtins',
 	setup(build) {
 		build.onResolve({ filter: /^[^./]/ }, args => {
-			if (!nodeBuiltins.has(args.path.replace(/^node:/, ''))) return undefined;
+			const bare = args.path.replace(/^node:/, '');
+			if (!nodeBuiltins.has(bare)) return undefined;
+			// Keyed on BOTH the importing file and the module, so each desktop-only file is
+			// held to its own allow-list: the same built-in from anywhere else still fails.
+			if (DESKTOP_ONLY_FILES.get(args.importer)?.includes(bare)) {
+				return { path: args.path, external: true };
+			}
 			return { errors: [{ text: `Node built-in "${args.path}" imported from ${args.importer}` }] };
 		});
 	},
@@ -95,9 +117,38 @@ async function bundleErrors(entry: esbuild.BuildOptions): Promise<string[]> {
 	return 'errors' in result ? result.errors.map(e => e.text) : [];
 }
 
+/** Bundle output text, for asserting exactly which Node built-ins survive into the bundle. */
+async function bundleOutput(entry: esbuild.BuildOptions): Promise<string> {
+	const result = await esbuild.build({
+		...entry,
+		bundle: true,
+		write: false,
+		format: 'cjs',
+		target: 'es2018',
+		logLevel: 'silent',
+		external: obsidianExternals,
+		platform: 'browser',
+		plugins: [rejectNodeBuiltins],
+	}).catch((error: esbuild.BuildFailure) => error);
+	// Discriminate on `outputFiles`, not `errors`: both BuildResult and BuildFailure carry an
+	// `errors` array, so `'errors' in result` narrows the good case to `never`.
+	if (!('outputFiles' in result)) {
+		throw new Error(result.errors.map(e => e.text).join('\n'));
+	}
+	return (result.outputFiles ?? []).map(f => f.text).join('\n');
+}
+
 describe('mobile API compatibility: bundle', () => {
 	it('bundles the plugin without importing any Node built-in', async () => {
 		expect(await bundleErrors({ entryPoints: [path.join(repoRoot, 'main.ts')] })).toEqual([]);
+	}, 60000);
+
+	it('leaves exactly the allow-listed Node built-ins in the bundle', async () => {
+		const output = await bundleOutput({ entryPoints: [path.join(repoRoot, 'main.ts')] });
+		const required = [...output.matchAll(/require\(["']([^"']+)["']\)/g)]
+			.map(m => m[1].replace(/^node:/, ''))
+			.filter(name => nodeBuiltins.has(name));
+		expect([...new Set(required)].sort()).toEqual([...DESKTOP_ONLY_BUILTINS].sort());
 	}, 60000);
 
 	it.each([
@@ -105,8 +156,21 @@ describe('mobile API compatibility: bundle', () => {
 		['a node: prefixed built-in', 'import "node:path";'],
 		['a built-in subpath', 'import "fs/promises";'],
 		['a built-in that is also an installed npm package', 'import "events";'],
+		['the desktop-only exception\'s own module from an ordinary file', 'import "child_process";'],
 	])('rejects a stray import of %s', async (_label, code) => {
 		const errors = await bundleErrors({ stdin: { contents: code, resolveDir: repoRoot } });
+		expect(errors).toEqual([expect.stringContaining('Node built-in')]);
+	});
+
+	it.each([
+		['postSyncHook.ts', 'fs'],
+		['postSyncHook.ts', 'os'],
+		['deploy.ts', 'net'],
+		['deploy.ts', 'tls'],
+	])('rejects %s importing %s, which is not on its own allow-list', async (file, module) => {
+		const errors = await bundleErrors({
+			stdin: { contents: `import "${module}";`, resolveDir: repoRoot, sourcefile: desktopOnlyFile(file) },
+		});
 		expect(errors).toEqual([expect.stringContaining('Node built-in')]);
 	});
 

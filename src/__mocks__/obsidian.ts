@@ -89,7 +89,18 @@ export class Modal {
 export const Platform = {
 	isDesktop: true,
 	isMobile: false,
+	isDesktopApp: true,
+	isMobileApp: false,
 };
+
+/**
+ * Stand-in for Obsidian's desktop filesystem adapter. Used by post-sync hook tests to
+ * exercise the `vault.adapter instanceof FileSystemAdapter` desktop gate.
+ */
+export class FileSystemAdapter {
+	getName(): string { return 'file-system'; }
+	getBasePath(): string { return '/mock-vault'; }
+}
 
 // ========================================================
 // SETTINGS APIS

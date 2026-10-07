@@ -72,6 +72,19 @@ export const FIT_OWN_SETTINGS_DENYLIST = [
 	"repo",
 	"branch",
 	"deviceName",
+	// FitSettings — deployment configuration (desktop-only, per-device). Unlike the hook's
+	// command/cwd, none of this is portable: the paths point at one machine's filesystem and
+	// the server fields are credentials for one server. `sftpPassword` is the load-bearing one —
+	// data.json is itself a synced file, so a field missing from this list is pushed to GitHub.
+	// (`enableAutoDeploy` is deliberately absent: it is a preference, like
+	// `postSyncHookEnabled`, and it is inert without the fields below.)
+	"astroProjectPath",
+	"vaultContentPath",
+	"sftpHost",
+	"sftpPort",
+	"sftpUser",
+	"sftpPassword",
+	"sftpRemotePath",
 	// LocalStores — per-device sync bookkeeping
 	"localShas",
 	"localSha",
