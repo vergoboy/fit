@@ -7,8 +7,6 @@ import { describe, it, expect, vi, type Mock, beforeEach, afterEach } from 'vite
 import FitPlugin from '@/fitPlugin';
 import { FitStatusModal } from '@/fitStatusModal';
 import { DEFAULT_SETTINGS } from '@/fitSettings';
-import { FileSystemAdapter } from 'obsidian';
-import { tmpdir } from 'os';
 import { FITATTRIBUTES_PATH } from '@/fitAttributes';
 import type { LocalStores } from '@/localStores';
 import type { BlobSha } from '@/util/hashing';
@@ -228,100 +226,33 @@ describe('FitPlugin persistence lifecycle', () => {
 			expect(plugin.settings.syncOnOpen).toBe(true);
 		});
 
-		it('adopts the built-in deployment paths when a saved path is empty or whitespace', async () => {
+		it('trims the publish folder and keeps publish defaults', async () => {
 			const plugin = makePlugin();
-			mockLoad(plugin, { astroProjectPath: '', vaultContentPath: '   ' });
+			mockLoad(plugin, { publishFolder: '  vault/site  ' });
 			await plugin.loadSettings();
-			expect(plugin.settings.astroProjectPath).toBe(DEFAULT_SETTINGS.astroProjectPath);
-			expect(plugin.settings.vaultContentPath).toBe(DEFAULT_SETTINGS.vaultContentPath);
-		});
-
-		it('keeps saved deployment paths that differ from the built-in default', async () => {
-			const plugin = makePlugin();
-			mockLoad(plugin, { astroProjectPath: '/srv/site', vaultContentPath: '/srv/vault' });
-			await plugin.loadSettings();
-			expect(plugin.settings.astroProjectPath).toBe('/srv/site');
-			expect(plugin.settings.vaultContentPath).toBe('/srv/vault');
+			expect(plugin.settings.publishFolder).toBe('vault/site');
+			expect(plugin.settings.publishBuild).toBe(true);
+			expect(plugin.settings.publishAfterSync).toBe(false);
 		});
 	});
 });
 
-describe('FitPlugin.runDeploymentNow pre-flight', () => {
-	/** A vault shape `isDeploymentSupported` accepts: desktop platform + filesystem adapter. */
-	const desktopApp = () => ({ vault: { adapter: new FileSystemAdapter() } }) as any;
+describe('FitPlugin.publishNow pre-flight', () => {
+	beforeEach(() => { NoticeCtor.mockClear(); });
 
-	beforeEach(() => {
-		NoticeCtor.mockClear();
+	it('refuses to start without a URL and token', async () => {
+		const plugin = makePlugin();
+		plugin.settings = { ...DEFAULT_SETTINGS, publishToken: '' } as any;
+		await plugin.publishNow();
+		expect(NoticeCtor).toHaveBeenCalledWith(expect.stringContaining('set the site URL and token'), 0);
 	});
 
-	it('refuses to start while auto-deploy is off', async () => {
+	it('does not start a second run while one is active', async () => {
 		const plugin = makePlugin();
-		plugin.app = desktopApp();
-		plugin.settings = { ...DEFAULT_SETTINGS, enableAutoDeploy: false } as any;
-		const maybeRun = vi.spyOn(plugin as any, 'maybeRunDeployment');
-
-		await plugin.runDeploymentNow();
-
-		expect(maybeRun).not.toHaveBeenCalled();
-		expect(NoticeCtor).toHaveBeenCalledWith(expect.stringContaining('enable auto-deploy'), undefined);
-	});
-
-	it('reports an incomplete configuration instead of starting a run', async () => {
-		const plugin = makePlugin();
-		plugin.app = desktopApp();
-		plugin.settings = {
-			...DEFAULT_SETTINGS,
-			enableAutoDeploy: true,
-			astroProjectPath: '',
-			vaultContentPath: '',
-		} as any;
-		const maybeRun = vi.spyOn(plugin as any, 'maybeRunDeployment');
-
-		await plugin.runDeploymentNow();
-
-		expect(maybeRun).not.toHaveBeenCalled();
-		expect(NoticeCtor).toHaveBeenCalledWith(
-			expect.stringContaining('deployment blocked — settings are incomplete'),
-			0
-		);
-	});
-
-	it('reports a configuration whose paths do not exist on this machine', async () => {
-		const plugin = makePlugin();
-		plugin.app = desktopApp();
-		plugin.settings = {
-			...DEFAULT_SETTINGS,
-			enableAutoDeploy: true,
-			astroProjectPath: '/definitely/not/a/project',
-		} as any;
-		const maybeRun = vi.spyOn(plugin as any, 'maybeRunDeployment');
-
-		await plugin.runDeploymentNow();
-
-		expect(maybeRun).not.toHaveBeenCalled();
-		expect(NoticeCtor).toHaveBeenCalledWith(
-			expect.stringContaining('website project not found: /definitely/not/a/project'),
-			0
-		);
-	});
-
-	it('hands a valid configuration to the pipeline as a manual run with one pushed change', async () => {
-		const plugin = makePlugin();
-		plugin.app = desktopApp();
-		plugin.settings = {
-			...DEFAULT_SETTINGS,
-			enableAutoDeploy: true,
-			// Both folders exist, so the pre-flight passes and the handoff is what is under test.
-			astroProjectPath: tmpdir(),
-			vaultContentPath: tmpdir(),
-		} as any;
-		const maybeRun = vi.spyOn(plugin as any, 'maybeRunDeployment').mockResolvedValue(undefined);
-
-		await plugin.runDeploymentNow();
-
-		// 1, not 0: the commit gate is what this entry point deliberately bypasses.
-		expect(maybeRun).toHaveBeenCalledWith(1, 'manual');
-		expect(NoticeCtor).not.toHaveBeenCalled();
+		plugin.settings = { ...DEFAULT_SETTINGS, publishToken: 'vgp_x' } as any;
+		(plugin as any).publishActive = true;
+		await plugin.publishNow();
+		expect(NoticeCtor).toHaveBeenCalledWith(expect.stringContaining('already running'), undefined);
 	});
 });
 

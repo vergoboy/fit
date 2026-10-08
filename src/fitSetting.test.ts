@@ -13,11 +13,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
-import { FileSystemAdapter } from 'obsidian';
 import FitSettingTab from './fitSettingTab';
 import { FitLogger } from './logger';
 import { DEFAULT_SETTINGS } from '@/fitSettings';
-import { deploymentLogPath } from '@/deploy';
 
 const EMPTY_SETTINGS = { ...DEFAULT_SETTINGS };
 
@@ -468,8 +466,7 @@ describe('FitSettingTab - auto-sync triggers (#65)', () => {
 	});
 });
 
-describe('FitSettingTab - deployment (desktop only)', () => {
-	/** Find a rendered setting row by its label, as the user sees it. */
+describe('FitSettingTab - publishing', () => {
 	const findRow = (container: HTMLElement, labelText: string): HTMLElement | null =>
 		Array.from(container.querySelectorAll('.setting-item')).find(
 			setting => setting.querySelector('.setting-item-name')?.textContent === labelText
@@ -477,113 +474,47 @@ describe('FitSettingTab - deployment (desktop only)', () => {
 
 	const makeTab = (overrides: Record<string, unknown> = {}) => {
 		const fakePlugin: any = {
-			settings: {
-				...DEFAULT_SETTINGS,
-				enableAutoDeploy: true,
-				astroProjectPath: '/site',
-				vaultContentPath: '/vault',
-				sftpHost: 'example.com',
-				sftpUser: 'deploy',
-				sftpRemotePath: '/var/www/site',
-				...overrides,
-			},
+			settings: { ...DEFAULT_SETTINGS, publishToken: 'vgp_abc', ...overrides },
 			saveSettings: vi.fn().mockResolvedValue(undefined),
-			runDeploymentNow: vi.fn().mockResolvedValue(undefined),
-			app: { vault: { adapter: new FileSystemAdapter() } },
+			publishNow: vi.fn().mockResolvedValue(undefined),
+			app: {},
 		};
 		const settingTab = new FitSettingTab({} as any, fakePlugin);
-		settingTab.deploymentBlock();
+		settingTab.publishBlock();
 		return { settingTab, fakePlugin };
 	};
 
-	const readinessDesc = (container: HTMLElement) =>
-		findRow(container, 'Readiness')?.querySelector('.setting-item-description')?.textContent ?? '';
-
-	it('renders the deployment rows as setting-items and persists the toggle', async () => {
+	it('persists the URL and the folder', async () => {
 		const { settingTab, fakePlugin } = makeTab();
-		const container = settingTab.containerEl;
+		const url = findRow(settingTab.containerEl, 'Site URL')!.querySelector('input') as HTMLInputElement;
+		url.value = ' https://example.org ';
+		url.dispatchEvent(new Event('input'));
+		await vi.waitFor(() => expect(fakePlugin.settings.publishUrl).toBe('https://example.org'));
+		const folder = findRow(settingTab.containerEl, 'Vault folder')!.querySelector('input') as HTMLInputElement;
+		folder.value = 'site';
+		folder.dispatchEvent(new Event('input'));
+		await vi.waitFor(() => expect(fakePlugin.settings.publishFolder).toBe('site'));
+	});
 
-		const toggleRow = findRow(container, 'Enable auto-deploy')!;
-		expect(toggleRow.className).toBe('setting-item');
-		expect(toggleRow.classList.contains('setting-item-heading')).toBe(false);
+	it('masks the token field', () => {
+		const { settingTab } = makeTab();
+		expect((findRow(settingTab.containerEl, 'Publish token')!.querySelector('input') as HTMLInputElement).type).toBe('password');
+	});
 
-		const toggle = toggleRow.querySelector('input[type="checkbox"]') as HTMLInputElement;
-		expect(toggle.checked).toBe(true);
-		toggle.checked = false;
+	it('persists the auto-publish toggle', async () => {
+		const { settingTab, fakePlugin } = makeTab();
+		const toggle = findRow(settingTab.containerEl, 'Publish automatically after sync')!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+		toggle.checked = true;
 		toggle.dispatchEvent(new Event('change'));
-
-		await vi.waitFor(() => expect(fakePlugin.saveSettings).toHaveBeenCalled());
-		expect(fakePlugin.settings.enableAutoDeploy).toBe(false);
-
-		const pathInput = findRow(container, 'Astro project path')!.querySelector('input') as HTMLInputElement;
-		expect(pathInput.value).toBe('/site');
-		pathInput.value = '/new/site';
-		pathInput.dispatchEvent(new Event('input'));
-		await vi.waitFor(() => expect(fakePlugin.settings.astroProjectPath).toBe('/new/site'));
+		await vi.waitFor(() => expect(fakePlugin.settings.publishAfterSync).toBe(true));
 	});
 
-	it('stores the server port as a number and falls back to the default when empty', async () => {
+	it('wires Validate and Publish buttons', () => {
 		const { settingTab, fakePlugin } = makeTab();
-		const portInput = findRow(settingTab.containerEl, 'Server port')!.querySelector('input') as HTMLInputElement;
-
-		expect(portInput.type).toBe('number');
-		expect(portInput.value).toBe('22');
-
-		portInput.value = '2222';
-		portInput.dispatchEvent(new Event('input'));
-		await vi.waitFor(() => expect(fakePlugin.settings.sftpPort).toBe(2222));
-		expect(typeof fakePlugin.settings.sftpPort).toBe('number');
-
-		portInput.value = '';
-		portInput.dispatchEvent(new Event('input'));
-		await vi.waitFor(() => expect(fakePlugin.settings.sftpPort).toBe(22));
-	});
-
-	it('masks the server password field', () => {
-		const { settingTab } = makeTab();
-		const passwordInput = findRow(settingTab.containerEl, 'Server password')!.querySelector('input') as HTMLInputElement;
-		expect(passwordInput.type).toBe('password');
-	});
-
-	it('tracks readiness as required fields are filled in', async () => {
-		const { settingTab } = makeTab();
-		expect(readinessDesc(settingTab.containerEl)).toContain('Ready —');
-
-		const hostInput = findRow(settingTab.containerEl, 'Server host')!.querySelector('input') as HTMLInputElement;
-		hostInput.value = '';
-		hostInput.dispatchEvent(new Event('input'));
-		// Readiness is refreshed after the settings save resolves, so it lands a microtask later.
-		await vi.waitFor(() =>
-			expect(readinessDesc(settingTab.containerEl)).toContain('Not ready — still needs: Server host')
-		);
-	});
-
-	it('runs a deployment from the Run now button', () => {
-		const { settingTab, fakePlugin } = makeTab();
-		const button = Array.from(settingTab.containerEl.querySelectorAll('button')).find(
-			b => b.textContent === 'Run now'
-		)!;
-		button.click();
-		expect(fakePlugin.runDeploymentNow).toHaveBeenCalledTimes(1);
-	});
-
-	it('offers the real default paths as placeholders, even when the saved values are blank', () => {
-		const { settingTab } = makeTab({ astroProjectPath: '', vaultContentPath: '' });
-		const container = settingTab.containerEl;
-
-		expect(findRow(container, 'Astro project path')!.querySelector('input')!.placeholder)
-			.toBe(DEFAULT_SETTINGS.astroProjectPath);
-		expect(findRow(container, 'Vault content path')!.querySelector('input')!.placeholder)
-			.toBe(DEFAULT_SETTINGS.vaultContentPath);
-	});
-
-	it('names the run log file in the Run deployment now description', () => {
-		const { settingTab } = makeTab();
-		const description = findRow(settingTab.containerEl, 'Run deployment now')!
-			.querySelector('.setting-item-description')!.textContent!;
-
-		// Same path the deployer appends to at runtime — not a hard-coded example.
-		expect(deploymentLogPath()).toContain('.fit-deploy.log');
-		expect(description).toContain(deploymentLogPath()!);
+		const btn = (label: string) => Array.from(settingTab.containerEl.querySelectorAll('button')).find(b => b.textContent === label)!;
+		btn('Validate').click();
+		expect(fakePlugin.publishNow).toHaveBeenCalledWith({ dryRun: true });
+		btn('Publish').click();
+		expect(fakePlugin.publishNow).toHaveBeenLastCalledWith();
 	});
 });

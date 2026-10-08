@@ -36,7 +36,7 @@ If you use [jj](https://jj-vcs.github.io/jj/), install [jj-hooks](https://crates
 - **[sync-scenario-matrix.md](./sync-scenario-matrix.md)** - Sync scenarios and which tests cover them
 - **[sync-performance-inventory.md](./sync-performance-inventory.md)** - Where sync spends network and local cost
 - **[post-sync-hook.md](./post-sync-hook.md)** - Opt-in post-sync build/deploy command (desktop only)
-- **[deployment.md](./deployment.md)** - Opt-in built-in content → build → upload deployment (desktop only)
+- **[publishing.md](./publishing.md)** - Publish notes to the website through its admin API (HTTPS, works on mobile)
 - **[guidelines/testing.md](./guidelines/testing.md)** - Testing standards
 
 ## Roadmap & Priorities

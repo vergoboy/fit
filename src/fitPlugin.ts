@@ -1,4 +1,4 @@
-import { Notice, Plugin, SettingTab, TFile } from 'obsidian';
+import { Notice, Plugin, SettingTab, TFile, requestUrl } from 'obsidian';
 import { FitStatusModal } from '@/fitStatusModal';
 import { renderExplanation, type AutoSyncInfo } from '@/fitStatusExplainer';
 import { Fit } from '@/fit';
@@ -15,14 +15,7 @@ import * as Encryption from "@/encryption";
 import { FitSettings, DEFAULT_SETTINGS, withDefaults } from '@/fitSettings';
 import { FitAttributesFile, FITATTRIBUTES_PATH, parseFitAttributes } from '@/fitAttributes';
 import { isPostSyncHookSupported, runPostSyncHook } from '@/postSyncHook';
-import { deploymentConfigurationProblem, isDeploymentSupported, runDeployment, type DeploymentStage } from '@/deploy';
-
-/** Wording for the deployment progress notice, one per stage of `runDeployment`. */
-const DEPLOYMENT_STAGE_LABELS: Record<DeploymentStage, string> = {
-	content: 'syncing vault content',
-	build: 'building the site',
-	upload: 'uploading to the server',
-};
+import { collectBundle, describeResult, publishBundle, type HttpFn } from '@/publish/publisher';
 
 /**
  * Discriminated union representing the outcome of a sync operation.
@@ -75,7 +68,7 @@ export default class FitPlugin extends Plugin {
 	private currentSyncNotice: FitNotice | null = null; // The active sync notice (shared by concurrent requests)
 	private saveSyncDebounceTimer: number | null = null; // Pending debounced sync after a file save
 	private postSyncHookActive = false; // Guards against overlapping post-sync hook runs
-	private deploymentActive = false; // Guards against overlapping deployment runs
+	private publishActive = false; // Guards against overlapping publish runs
 	private postSyncTimeoutSec = 900; // Fallback when user setting has not loaded
 
 	// if settings not configured, open settings to let user quickly setup
@@ -387,10 +380,11 @@ export default class FitPlugin extends Plugin {
 				// pull-only sync has nothing new to build), and deliberately not awaited: a
 				// full site build plus rsync must never hold the sync UI open.
 				void this.maybeRunPostSyncHook(outcome.result.pushedRemoteChanges?.length ?? 0, triggerType);
-				// Opt-in desktop-only built-in deployment. Same commit gate and same fire-and-forget
-				// reasoning as the hook above; it is a separate guard so the two cannot deadlock each
-				// other, and having both configured is called out in the settings UI.
-				void this.maybeRunDeployment(outcome.result.pushedRemoteChanges?.length ?? 0, triggerType);
+				// Opt-in publish to the website (HTTPS, works on mobile). Same commit gate and the
+				// same fire-and-forget reasoning as the hook above.
+				if (this.settings.publishAfterSync && (outcome.result.pushedRemoteChanges?.length ?? 0) > 0) {
+					void this.publishNow({ quiet: true });
+				}
 				break;
 
 			case 'already-syncing':
@@ -537,130 +531,44 @@ export default class FitPlugin extends Plugin {
 	}
 
 	/**
-	 * Entry point: deploy on demand from the command palette or the settings button.
-	 *
-	 * Bypasses the "did this sync create a commit" gate — the point is to deploy without
-	 * waiting for a content change (first deploy, or a retry after a failed run). Everything
-	 * else is the pipeline the sync trigger uses, stage for stage (`content → build →
-	 * upload`), so there is no second code path to drift; there is no git commit or push in
-	 * either of them.
-	 *
-	 * The configuration is checked *before* the pipeline starts, so an empty or non-existent
-	 * project/vault path is reported as one clear error instead of a deploy that died in its
-	 * first stage.
+	 * Validate and publish the vault's `project/` and `journal/` notes through the site's admin API.
+	 * Never throws: a failed publish must not surface as a failed sync.
 	 */
-	runDeploymentNow = async (): Promise<void> => {
-		if (!this.settings?.enableAutoDeploy) {
-			new Notice('FIT: enable auto-deploy in FIT settings first — "Run deployment now" runs the same pipeline the sync trigger does.');
+	publishNow = async (opts: { dryRun?: boolean; quiet?: boolean } = {}): Promise<void> => {
+		const s = this.settings;
+		if (!s.publishUrl.trim() || !s.publishToken.trim()) {
+			new Notice('FIT: set the site URL and token in FIT settings ▸ Publishing first.', 0);
 			return;
 		}
-		if (!isDeploymentSupported(this.app.vault)) {
-			new Notice('FIT: deployment is desktop-only and cannot run on this device.', 0);
+		if (this.publishActive) {
+			new Notice('FIT: a publish is already running.');
 			return;
 		}
-		const problem = deploymentConfigurationProblem(this.settings);
-		if (problem !== null) {
-			fitLogger.log('[Deploy] Blocked before start', { problem });
-			new Notice(`FIT: deployment blocked — ${problem}`, 0);
-			return;
-		}
-		await this.maybeRunDeployment(1, 'manual');
-	};
-
-	/**
-	 * Run the built-in deployment: vault content → website project → build → upload.
-	 *
-	 * Fire-and-forget by design (see the call site) — the sync is already complete and its
-	 * notice dismissed, while a build and an upload can take minutes. Never throws: a failing
-	 * deploy must not surface as a failed sync.
-	 *
-	 * @param pushedCount - local changes the sync wrote to remote; 0 means no new commit.
-	 * @param triggerType - whether the sync was manual or scheduled, for logging only.
-	 */
-	private async maybeRunDeployment(pushedCount: number, triggerType: 'manual' | 'auto'): Promise<void> {
-		if (pushedCount === 0 || !this.settings?.enableAutoDeploy) {
-			return;
-		}
-
-		// Re-entrancy guard, for the same reason as the post-sync hook: two concurrent
-		// deployments would race over the same dist/ and upload it twice.
-		if (this.deploymentActive) {
-			fitLogger.log('[Deploy] Skipped — a previous deployment is still in progress', { triggerType });
-			new Notice('FIT: deployment skipped — the previous one is still in progress.', 0);
-			return;
-		}
-
-		if (!isDeploymentSupported(this.app.vault)) {
-			fitLogger.log('[Deploy] Skipped — desktop-only', { triggerType });
-			new Notice('FIT: deployment is desktop-only and was skipped on this device.', 0);
-			return;
-		}
-
-		if (this.settings.postSyncHookEnabled) {
-			fitLogger.log('[Deploy] The post-sync hook is also enabled — both would build the site');
-		}
-
-		this.deploymentActive = true;
-		const startedAt = Date.now();
-		fitLogger.log('[Deploy] Starting', {
-			triggerType,
-			pushed: pushedCount,
-			project: this.settings.astroProjectPath,
-		});
-		const progressNotice = new Notice('FIT: deploying — preparing…', 0);
-
+		this.publishActive = true;
+		const notice = new Notice(opts.dryRun ? 'FIT: validating notes…' : 'FIT: publishing notes…', 0);
 		try {
-			const result = await runDeployment(this.app.vault, this.settings, {
-				onOutput: (line) => fitLogger.log(`[Deploy] ${line}`),
-				onStage: (stage) => progressNotice.setMessage(`FIT: deploying — ${DEPLOYMENT_STAGE_LABELS[stage]}…`),
-			});
-
-			const durationSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-
-			if (result.status === 'skipped') {
-				fitLogger.log('[Deploy] Skipped', { reason: result.reason, durationSec });
-				progressNotice.hide();
-				if (result.reason === 'not-configured') {
-					new Notice('FIT: deployment is enabled but its settings are incomplete — see FIT settings ▸ Deployment configuration.', 0);
-				} else if (result.reason === 'unsupported-platform') {
-					new Notice('FIT: deployment is desktop-only and was skipped on this device.', 0);
-				}
-				return;
-			}
-
-			if (result.status === 'success') {
-				fitLogger.log('[Deploy] Completed', {
-					durationSec,
-					copied: result.copied,
-					removed: result.removed,
-					from: result.uploadedFrom,
-				});
-				progressNotice.hide();
-				new Notice(`FIT: deployed in ${durationSec}s (${result.copied} content file(s), ${result.removed} stale removed).`, 5000);
-				return;
-			}
-
-			fitLogger.log('[Deploy] Failed', {
-				durationSec,
-				stage: result.stage,
-				message: result.message,
-				exitCode: result.exitCode,
-				signal: result.signal,
-				timedOut: result.timedOut,
-			});
-			// Left sticky on purpose: a half-published site is not something to auto-dismiss, and
-			// the full output is in the fit debug log for the user to read.
-			progressNotice.setMessage(`FIT: deployment failed during ${result.stage} — ${result.message}. See the FIT debug log for output.`);
+			const bundle = await collectBundle(this.app.vault, s);
+			for (const w of bundle.warnings) fitLogger.log('[Publish] warning', { w });
+			const http: HttpFn = async (req) => {
+				const res = await requestUrl({ url: req.url, method: req.method, headers: req.headers, body: req.body, throw: false });
+				let json: unknown = {};
+				try { json = res.json; } catch { /* non-JSON error body */ }
+				return { status: res.status, json };
+			};
+			const result = await publishBundle(s, bundle, http, { dryRun: opts.dryRun });
+			fitLogger.log('[Publish] result', { ...result });
+			const text = describeResult(result) + (bundle.warnings.length ? `
+(${bundle.warnings.length} warning(s) in the FIT log)` : '');
+			notice.setMessage(text);
+			if (result.ok) setTimeout(() => notice.hide(), opts.quiet ? 4000 : 8000);
 		} catch (error) {
-			// runDeployment resolves rather than rejects, so reaching here means an unexpected bug.
-			// Do not let it escape into the sync path.
 			const message = error instanceof Error ? error.message : String(error);
-			fitLogger.log('[Deploy] Unexpected error', { message });
-			progressNotice.setMessage(`FIT: deployment failed unexpectedly: ${message}`);
+			fitLogger.log('[Publish] Unexpected error', { message });
+			notice.setMessage(`FIT: publish failed unexpectedly: ${message}`);
 		} finally {
-			this.deploymentActive = false;
+			this.publishActive = false;
 		}
-	}
+	};
 
 	private async explainSyncStatus(): Promise<void> {
 		if (!this.checkSettingsConfigured()) return;
@@ -814,11 +722,15 @@ export default class FitPlugin extends Plugin {
 				callback: () => this.runPostSyncHookNow()
 			});
 
-			// Desktop-only for the same reason as the hook command above.
 			this.addCommand({
-				id: 'fit-run-deployment',
-				name: 'Run deployment',
-				callback: () => this.runDeploymentNow()
+				id: 'fit-publish',
+				name: 'Publish notes to the website',
+				callback: () => this.publishNow()
+			});
+			this.addCommand({
+				id: 'fit-publish-validate',
+				name: 'Validate notes for the website (dry run)',
+				callback: () => this.publishNow({ dryRun: true })
 			});
 
 			// This adds a settings tab so the user can configure various aspects of the plugin
@@ -856,8 +768,7 @@ export default class FitPlugin extends Plugin {
 
 	async loadSettings() {
 		const userSetting = await this.loadData();
-		// withDefaults, not a plain Object.assign: a saved "" for a deployment path means
-		// "never configured on this device" and must not shadow the built-in default.
+		// withDefaults, not a plain Object.assign: trims the publish folder.
 		const merged = withDefaults(userSetting as Partial<FitSettings> | null);
 		// Raw view over the same object: values arrive as whatever JSON stored (a "5" for a
 		// number, a "" for a path), so the coercion below reads them before their types are
@@ -869,10 +780,10 @@ export default class FitPlugin extends Plugin {
 				// would need a single type that fits every remaining key at once.
 				const target = obj as unknown as Record<string, unknown>;
 				if (raw.hasOwnProperty(key)) {
-					if (key == "checkEveryXMinutes" || key == "fileChangesNoticeDurationSec" || key == "postSyncHookTimeoutSec" || key == "sftpPort") {
+					if (key == "checkEveryXMinutes" || key == "fileChangesNoticeDurationSec" || key == "postSyncHookTimeoutSec") {
 						target[key] = Number(raw[key]);
 					}
-					else if (key === "notifyChanges" || key === "notifyConflicts" || key === "enableDebugLogging" || key === "syncHiddenFiles" || key === "syncOnSave" || key === "syncOnOpen" || key === "postSyncHookEnabled" || key === "enableAutoDeploy") {
+					else if (key === "notifyChanges" || key === "notifyConflicts" || key === "enableDebugLogging" || key === "syncHiddenFiles" || key === "syncOnSave" || key === "syncOnOpen" || key === "postSyncHookEnabled" || key === "publishAfterSync" || key === "publishBuild") {
 						target[key] = Boolean(raw[key]);
 					}
 					else {

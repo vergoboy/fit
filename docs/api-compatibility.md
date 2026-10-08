@@ -183,7 +183,6 @@ Use `require('fs')` for the load: in Obsidian's renderer a bare `import('fs')` i
 | File | May use | Gate | Reason |
 | ---- | ------- | ---- | ------ |
 | [src/postSyncHook.ts](../src/postSyncHook.ts) | `child_process` | `Platform.isDesktopApp && vault.adapter instanceof FileSystemAdapter` | Runs the user's opt-in post-sync build/deploy command after a sync that pushed a commit. Nothing else in the plugin depends on it, and it is off by default. |
-| [src/deploy.ts](../src/deploy.ts) | `child_process`, `fs`, `os`, `path` | `Platform.isDesktopApp && vault.adapter instanceof FileSystemAdapter` | Spawns the build and the `ssh`/`rsync` upload for the opt-in built-in deployment after a sync that pushed a commit. Nothing else in the plugin depends on it, and it is off by default. |
 
 The post-sync hook is the simplest example of the shape above:
 
@@ -192,9 +191,8 @@ The post-sync hook is the simplest example of the shape above:
 - Its per-file block in `eslint.config.js` relaxes only `no-restricted-globals` by removing `require`; `Buffer`, `process`, and the whole Node built-in import ban still apply to the file.
 - The bundle check in [src/apiCompatibility.test.ts](../src/apiCompatibility.test.ts) treats a built-in as external **only** when both the importing file and the module are on that file's allow-list, asserts the bundle requires exactly the union of those modules, and asserts a non-allow-listed built-in — including one that is on a *different* file's list — still fails.
 
-`src/deploy.ts` follows the same shape with a larger allow-list (`child_process`, `fs`, `os`, `path`): all four are `require`d lazily inside `loadNodeModules`, behind the same gate, and every path where they are absent resolves to a `skipped` result. The bundle check holds one allow-list per file, so the union is what may survive into the bundle while each import is still checked against its own file.
 
-See [docs/post-sync-hook.md](post-sync-hook.md) and [docs/deployment.md](deployment.md) for the features themselves.
+See [docs/post-sync-hook.md](post-sync-hook.md) and [docs/publishing.md](publishing.md) for the features themselves.
 
 ## Known Electron Compatibility Issues
 

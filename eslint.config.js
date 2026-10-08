@@ -105,7 +105,7 @@ export default [
 		// `child_process` only; the deployment: `child_process`, `fs`, `os`, `path`) and
 		// assert nothing else reaches the bundle; docs/api-compatibility.md
 		// ("Desktop-only exceptions") documents both.
-		files: ['src/postSyncHook.ts', 'src/deploy.ts'],
+		files: ['src/postSyncHook.ts'],
 		rules: {
 			'no-restricted-globals': ['error',
 				{ name: 'Buffer', message: 'Buffer is Node.js-only. Use TextEncoder/arrayBufferToBase64 instead.' },

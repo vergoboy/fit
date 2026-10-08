@@ -32,25 +32,17 @@ export interface FitSettings {
 	postSyncHookCwd: string
 	/** Hard timeout for the hook command, in seconds. */
 	postSyncHookTimeoutSec: number
-	// opt-in auto-deploy after a sync that pushed a commit; off by default, desktop-only,
-	// see docs/deployment.md
-	enableAutoDeploy: boolean
-	/** Local checkout of the website project the vault is published to. */
-	astroProjectPath: string
-	/** Vault folder holding the publishable `project/` and `journal/` trees. */
-	vaultContentPath: string
-	/** Deployment server. The `sftp*` names are kept from the original feature request even
-	 * though the transport is rsync over SSH — these are the same credentials. */
-	sftpHost: string
-	/** SSH port. */
-	sftpPort: number
-	/** SSH user. */
-	sftpUser: string
-	/** SSH password. Only needed when the server refuses key auth; stored in plaintext in
-	 * data.json, which is why it is on FIT's own settings denylist (see protectedPaths.ts). */
-	sftpPassword: string
-	/** Directory on the server that `dist/` is published to. */
-	sftpRemotePath: string
+	// Publishing to the website through its admin API (HTTPS + bearer token; works on mobile).
+	// See docs/publishing.md.
+	publishUrl: string
+	/** Token created in the site dashboard (Settings ▸ FIT tokens). Per-device secret, never synced. */
+	publishToken: string
+	/** Vault folder that contains `project/<lang>/` and `journal/<lang>/`. */
+	publishFolder: string
+	/** Publish automatically after a sync that pushed a commit. */
+	publishAfterSync: boolean
+	/** Ask the server to rebuild the site once the notes are accepted. */
+	publishBuild: boolean
 }
 
 export const DEFAULT_SETTINGS: FitSettings = {
@@ -75,40 +67,16 @@ export const DEFAULT_SETTINGS: FitSettings = {
 	postSyncHookCommand: "",
 	postSyncHookCwd: "",
 	postSyncHookTimeoutSec: 900,
-	enableAutoDeploy: false,
-	astroProjectPath: "/home/arman/Documents/project/arman-hosseini",
-	vaultContentPath: "/home/arman/Documents/obsidian/arman/arman-hosseini",
-	sftpHost: "45.135.242.135",
-	sftpPort: 22,
-	sftpUser: "ubuntu",
-	sftpPassword: "",
-	sftpRemotePath: "/opt/arman-hosseini",
+	publishUrl: "https://arman-hosseini.ir",
+	publishToken: "",
+	publishFolder: "arman-hosseini",
+	publishAfterSync: false,
+	publishBuild: true,
 };
 
-/**
- * Deployment paths whose built-in default is re-adopted when a saved value comes back empty.
- *
- * An empty string here means "this device never had it filled in", not "I deliberately
- * cleared it": these are machine-specific paths, and letting a stale `""` in `data.json`
- * shadow the default would leave the field blank forever while the readiness line still
- * looks configurable. Cleared values therefore only stay cleared for settings that are not
- * on this list.
- */
-const DEPLOYMENT_PATH_KEYS = ['astroProjectPath', 'vaultContentPath'] as const;
-
-/**
- * Saved settings merged over {@link DEFAULT_SETTINGS}, the way `loadSettings` needs them.
- *
- * Same contract as `Object.assign({}, DEFAULT_SETTINGS, saved)` except for
- * {@link DEPLOYMENT_PATH_KEYS}: an empty (or whitespace-only) saved path falls back to the
- * default instead of winning over it. Extra keys in `saved` are dropped, exactly as before.
- */
+/** Saved settings merged over {@link DEFAULT_SETTINGS}; unknown keys in `saved` are dropped. */
 export function withDefaults(saved: Partial<FitSettings> | null | undefined): FitSettings {
 	const merged: FitSettings = { ...DEFAULT_SETTINGS, ...(saved ?? {}) };
-	for (const key of DEPLOYMENT_PATH_KEYS) {
-		if (typeof merged[key] === 'string' && merged[key].trim() === '') {
-			merged[key] = DEFAULT_SETTINGS[key];
-		}
-	}
+	if (typeof merged.publishFolder === 'string') merged.publishFolder = merged.publishFolder.trim();
 	return merged;
 }

@@ -63,13 +63,12 @@ const nodeBuiltins = new Set(nodeBuiltinNames);
 
 /**
  * The desktop-only files allowed to reach Node built-ins, mapped to the exact modules each one
- * may use: the post-sync hook's lazy `require('child_process')` and the deployer's lazy
+ * may use: the post-sync hook's lazy `require('child_process')` (the former rsync deployer was replaced by HTTPS publishing, so nothing else remains) and the deployer's lazy
  * `require()` of the process/fs modules it shells out with. Keep in sync with the per-file
  * block in eslint.config.js and docs/api-compatibility.md § Desktop-only exceptions.
  */
 const DESKTOP_ONLY_FILES = new Map<string, readonly string[]>([
 	[path.join(repoRoot, 'src/postSyncHook.ts'), ['child_process']],
-	[path.join(repoRoot, 'src/deploy.ts'), ['child_process', 'fs', 'os', 'path']],
 ]);
 
 /** Every built-in any desktop-only file may use — the union the bundle must not exceed. */
@@ -165,8 +164,8 @@ describe('mobile API compatibility: bundle', () => {
 	it.each([
 		['postSyncHook.ts', 'fs'],
 		['postSyncHook.ts', 'os'],
-		['deploy.ts', 'net'],
-		['deploy.ts', 'tls'],
+		['postSyncHook.ts', 'net'],
+		['postSyncHook.ts', 'tls'],
 	])('rejects %s importing %s, which is not on its own allow-list', async (file, module) => {
 		const errors = await bundleErrors({
 			stdin: { contents: `import "${module}";`, resolveDir: repoRoot, sourcefile: desktopOnlyFile(file) },
